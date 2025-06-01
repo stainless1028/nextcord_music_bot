@@ -76,6 +76,7 @@ class Session:
         self.voice_client.play(to_play.audio_source)
         await ctx.send(f"Now playing: {to_play.title}\n"
                        f"Duration: {timedelta(seconds=to_play.duration)}")
+        """스트림 url 만료 문제 -> 아마도 곡 다운로드로 해결해야할듯"""
 
 @bot.event
 async def on_ready():
