@@ -1,10 +1,12 @@
 import nextcord
+from datetime import timedelta
 from nextcord.ext import commands
 from nextcord import SlashOption
 import os
 from dotenv import load_dotenv
 from collections import deque
 import yt_dlp
+import asyncio
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -14,9 +16,9 @@ intents.members = True
 bot = commands.Bot(intents=intents)
 session_list = {}
 
-ffmpeg = "ffmpeg/ffmpeg.exe"
+FFMPEG_PATH = "ffmpeg/ffmpeg.exe"
 ffmpeg_options = {"options": "-vn -sn"}
-ytdl_opts = {"format": "bestaudio",
+YTDL_OPTIONS = {"format": "bestaudio",
              "outtmpl": "%(extractor)s-%(id)s-%(title)s.%(ext)s",
              "restrictfilenames": True,
              "no-playlist": True,
@@ -31,15 +33,49 @@ ytdl_opts = {"format": "bestaudio",
              "no_color": True,
              "overwrites": True,
              "age_limit": 100}
-ytdl = yt_dlp.YoutubeDL(ytdl_opts)
+ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
+
+class Music:
+    """stores music info"""
+    def __init__(self, audio_source: nextcord.AudioSource, audio_info):
+        self.audio_source = audio_source
+        self.audio_info = audio_info
+        self.title = audio_info.get("title", "Error parsing title")
+        # self.stream_url = audio_info.get("url", "Error parsing url")
+        # self.video_url = audio_info.get("webpage_url", "Error parsing url")
+        self.duration = audio_info.get("duration", 0)
 
 
 class Session:
-    def __init__(self, server, voice_client):
-        self.server_id = server
-        self.voice_client: nextcord.VoiceClient = voice_client
+    """stores bot voice client sessions"""
+    def __init__(self, server_id, voice_client: nextcord.VoiceClient):
+        self.server_id = server_id
+        self.voice_client = voice_client
         self.music_queue = deque()
 
+    async def add_queue(self, ctx, url):
+        """adds music to queues"""
+        song_info = await asyncio.to_thread(lambda: ytdl.extract_info(url, download=False))
+        if not song_info:
+            await ctx.send("An error occurred getting music info.")
+            return
+
+        stream_url = song_info.get("url")
+        if not stream_url:
+            await ctx.send("Could not find playable audio url.")
+            return
+
+        music = Music(await nextcord.FFmpegOpusAudio.from_probe(stream_url, **ffmpeg_options, executable=FFMPEG_PATH), song_info)
+        self.music_queue.append(music)
+        if self.voice_client.is_playing():
+            await ctx.send(f"{music.title} was added to queue.")
+        await self.fortest(ctx)
+
+    async def fortest(self, ctx):
+        to_play = self.music_queue.popleft()
+        self.voice_client.play(to_play.audio_source)
+        await ctx.send(f"Now playing: {to_play.title}\n"
+                       f"Duration: {timedelta(seconds=to_play.duration)}")
 
 @bot.event
 async def on_ready():
@@ -68,7 +104,7 @@ async def resume(ctx: nextcord.Interaction):
         await ctx.send("I am not connected to any voice channel.", ephemeral=True)
         return
     else:
-        if session_list[server_id].voice_client.is_playing():
+        if session_list[server_id].voice_client.is_paused():
             session_list[server_id].voice_client.resume()
             await ctx.send(f"<@{ctx.user.id}> Resumed a music.")
 
@@ -76,7 +112,7 @@ async def resume(ctx: nextcord.Interaction):
 @bot.slash_command()
 async def leave(ctx: nextcord.Interaction):
     """leave voice channel and delete the server from session list"""
-    if ctx.user.voice.channel is None:
+    if ctx.user.voice is None:
         await ctx.send("You are not connected to a voice channel!", ephemeral=True)
         return
     server_id = ctx.guild.id
@@ -109,8 +145,8 @@ async def play(ctx: nextcord.Interaction, query: str = SlashOption(
         session = session_list[server_id]
         if session.voice_client.channel != ctx.user.voice.channel:
             await session.voice_client.move_to(ctx.user.voice.channel)
-    await ctx.send("this is for a test response", ephemeral=True)
-    """다운하고 실행하는 기능 만들기, Session 클래스 내에서"""
+    await ctx.send("this is a test response", ephemeral=True)
+    await session.add_queue(ctx, query)
 
 
 if __name__ == "__main__":
