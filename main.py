@@ -1,5 +1,6 @@
 import nextcord
-from datetime import timedelta
+import datetime
+from nextcord.utils import format_dt
 from nextcord.ext import commands
 from nextcord import SlashOption
 import os
@@ -17,9 +18,9 @@ bot = commands.Bot(intents=intents)
 session_list = {}
 
 FFMPEG_PATH = "ffmpeg/ffmpeg.exe"
-ffmpeg_options = {"options": "-vn -sn"}
+FFMPEG_OPTIONS = {"options": "-vn -sn"}
 YTDL_OPTIONS = {"format": "bestaudio",
-             "outtmpl": "%(extractor)s-%(id)s-%(title)s.%(ext)s",
+             "outtmpl": "downloaded_musics/%(extractor)s-%(id)s-%(title)s.%(ext)s",
              "restrictfilenames": True,
              "no-playlist": True,
              "nocheckcertificate": True,
@@ -42,7 +43,7 @@ class Music:
         self.audio_info = audio_info
         self.title = audio_info.get("title", "Error parsing title")
         # self.stream_url = audio_info.get("url", "Error parsing url")
-        # self.video_url = audio_info.get("webpage_url", "Error parsing url")
+        self.video_url = audio_info.get("webpage_url", "Error parsing url")
         self.duration = audio_info.get("duration", 0)
 
 
@@ -53,19 +54,16 @@ class Session:
         self.voice_client = voice_client
         self.music_queue = deque()
 
+
     async def add_queue(self, ctx, url):
         """adds music to queues"""
-        song_info = await asyncio.to_thread(lambda: ytdl.extract_info(url, download=False))
+        song_info = await asyncio.to_thread(lambda: ytdl.extract_info(url, download=True))
         if not song_info:
             await ctx.send("An error occurred getting music info.")
             return
 
-        stream_url = song_info.get("url")
-        if not stream_url:
-            await ctx.send("Could not find playable audio url.")
-            return
-
-        music = Music(await nextcord.FFmpegOpusAudio.from_probe(stream_url, **ffmpeg_options, executable=FFMPEG_PATH), song_info)
+        audio_file = ytdl.prepare_filename(song_info)
+        music = Music(await nextcord.FFmpegOpusAudio.from_probe(audio_file, **FFMPEG_OPTIONS, executable=FFMPEG_PATH), song_info)
         self.music_queue.append(music)
         if self.voice_client.is_playing():
             await ctx.send(f"{music.title} was added to queue.")
@@ -74,9 +72,18 @@ class Session:
     async def fortest(self, ctx):
         to_play = self.music_queue.popleft()
         self.voice_client.play(to_play.audio_source)
-        await ctx.send(f"Now playing: {to_play.title}\n"
-                       f"Duration: {timedelta(seconds=to_play.duration)}")
-        """스트림 url 만료 문제 -> 아마도 곡 다운로드로 해결해야할듯"""
+        start = datetime.datetime.now()
+        end = start + datetime.timedelta(seconds=to_play.duration)
+        await ctx.send(f"Now playing: [{to_play.title}](<{to_play.video_url}>)\n"
+                       f"Duration: {format_dt(start, style="R")} - {format_dt(end, style="R")}")
+
+
+def clear_cache():
+    """removes all the downloaded files"""
+    if not session_list:
+        for file in os.listdir("downloaded_musics"):
+            os.remove(os.path.join("downloaded_musics", file))
+
 
 @bot.event
 async def on_ready():
@@ -124,6 +131,7 @@ async def leave(ctx: nextcord.Interaction):
         session_list[server_id].voice_client.cleanup()
         await session_list[server_id].voice_client.disconnect()
         del session_list[server_id]
+        clear_cache()
         await ctx.send(f"<@{ctx.user.id}> Disconnected from a voice channel.")
 
 
@@ -140,15 +148,16 @@ async def play(ctx: nextcord.Interaction, query: str = SlashOption(
             return
         else:
             session = await ctx.user.voice.channel.connect()
+            await ctx.send(f"Connected to <#{ctx.user.voice.channel.id}>")
             session_list[server_id] = Session(ctx.guild.id, session)
             session = session_list[server_id]
     else:
         session = session_list[server_id]
         if session.voice_client.channel != ctx.user.voice.channel:
             await session.voice_client.move_to(ctx.user.voice.channel)
-    await ctx.send("this is a test response", ephemeral=True)
     await session.add_queue(ctx, query)
 
 
 if __name__ == "__main__":
+    clear_cache()
     bot.run(TOKEN)
