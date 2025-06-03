@@ -18,7 +18,7 @@ session_list = {}
 FFMPEG_PATH = "ffmpeg/ffmpeg.exe"
 FFMPEG_OPTIONS = {"options": "-vn -sn"}
 YTDL_OPTIONS = {"format": "bestaudio",
-                "outtmpl": "downloaded_musics/%(extractor)s-%(id)s-%(title)s.%(ext)s",
+                "outtmpl": "downloaded_musics/%(extractor)s-%(id)s-%(title)s-%(epoch)s.%(ext)s",
                 "restrictfilenames": True,
                 # "no-playlist": True,
                 "nocheckcertificate": True,
@@ -37,12 +37,13 @@ ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 class Music:
     """stores music info"""
-    def __init__(self, audio_source: nextcord.AudioSource, audio_info):
+    def __init__(self, audio_source: nextcord.AudioSource, audio_info, filepath):
         self.audio_source = audio_source
         self.audio_info = audio_info
         self.title = audio_info.get("title", "Error parsing title")
         self.video_url = audio_info.get("webpage_url", "Error parsing url")
         self.duration = audio_info.get("duration", 0)
+        self.filepath = filepath
 
 
 class Session:
@@ -67,7 +68,7 @@ class Session:
 
         audio_file = ytdl.prepare_filename(music_info)
         audio_source = await nextcord.FFmpegOpusAudio.from_probe(audio_file, **FFMPEG_OPTIONS, executable=FFMPEG_PATH)
-        music = Music(audio_source, music_info)
+        music = Music(audio_source, music_info, audio_file)
         self.music_queue.append(music)
         if self.voice_client.is_playing() or self.voice_client.is_paused():
             await ctx.followup.send(f"{music.title} was added to queue.")
@@ -79,12 +80,17 @@ class Session:
         start = datetime.datetime.now()
         end = start + datetime.timedelta(seconds=to_play.duration)
         await ctx.followup.send(f"Now playing: [{to_play.title}](<{to_play.video_url}>)\n"
-                               f"Duration: {format_dt(start, style="R")} - {format_dt(end, style="R")}")
-        self.voice_client.play(to_play.audio_source, after=lambda e=None: self.after_playing(ctx, e))
+                                f"Duration: {format_dt(start, style="R")} - {format_dt(end, style="R")}")
+        self.voice_client.play(to_play.audio_source, after=lambda e=None: bot.loop.create_task(self.after_playing(ctx, to_play, e)))
 
-    async def after_playing(self, ctx, error):
+    async def after_playing(self, ctx, played, error):
         if error:
             await ctx.send("An error occurred playing music")
+        if os.path.exists(played.filepath):
+            try:
+                os.remove(played.filepath)
+            except OSError as e:
+                print(f"Error removing played file: {e}")
         if self.music_queue:  # queue is not empty
             await self.play_next(ctx)
         else:
@@ -94,7 +100,7 @@ class Session:
 def clear_cache():
     """removes all the downloaded files"""
     if not os.path.exists("downloaded_musics"):
-        os.makedirs("downloaded_musics") # Ensure directory exists
+        os.makedirs("downloaded_musics")  # Ensure directory exists
         return
     if not session_list:
         for file in os.listdir("downloaded_musics"):
@@ -195,7 +201,8 @@ async def play(ctx: nextcord.Interaction, query: str = SlashOption(
     session = session_list[server_id]
     if session.voice_client.channel != ctx.user.voice.channel:
         if any(m for m in session.voice_client.channel.members if not m.bot and m.id != bot.user.id):
-            await ctx.followup.send(f"I'm currently in <#{ctx.user.voice.channel.id}> with other users.", ephemeral=True)
+            await ctx.followup.send(f"I'm currently in <#{ctx.user.voice.channel.id}> with other users.",
+                                    ephemeral=True)
             return
         try:
             await session.voice_client.move_to(ctx.user.voice.channel)
