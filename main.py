@@ -114,6 +114,22 @@ async def on_ready():
     print(f"We have logged in as {bot.user}")
 
 
+# @bot.event
+# async def on_voice_state_update(member, before, after):
+#     """to handle the cases when bot is kicked from VC"""
+#     if member == bot.user:
+#         if before.channel and not after.channel:
+#             server_id = member.guild.id
+#             session_list[server_id].voice_client.cleanup()
+#             for music in session_list[server_id].music_queue:
+#                 filepath = music.filepath
+#                 try:
+#                     os.remove(filepath)
+#                 except OSError as e:
+#                     print(f"Error removing remaining file: {e}")
+#             del session_list[server_id]
+
+
 @bot.slash_command()
 async def pause(ctx: nextcord.Interaction):
     """pause current playing music"""
@@ -189,7 +205,7 @@ async def play(ctx: nextcord.Interaction, query: str = SlashOption(
         await ctx.send("You are not connected to a voice channel!", ephemeral=True)
         return
 
-    if server_id not in session_list:  # 음성채널에 있지 않음
+    if server_id not in session_list:
         try:
             session = await ctx.user.voice.channel.connect()
             session_list[server_id] = Session(ctx.guild.id, session)
