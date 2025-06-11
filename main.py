@@ -17,21 +17,26 @@ session_list = {}
 
 FFMPEG_PATH = "ffmpeg/ffmpeg.exe"
 FFMPEG_OPTIONS = {"options": "-vn -sn"}
-YTDL_OPTIONS = {"format": "bestaudio",
-                "outtmpl": "downloaded_musics/%(extractor)s-%(id)s-%(title)s-%(epoch)s.%(ext)s",
-                "restrictfilenames": True,
-                # "no-playlist": True,
-                "nocheckcertificate": True,
-                "ignoreerrors": False,
-                "logtostderr": False,
-                "geo-bypass": True,
-                "quiet": True,
-                "no_warnings": True,
-                "default_search": "auto",
-                "source_address": "0.0.0.0",
-                "no_color": True,
-                "overwrites": True,
-                "age_limit": 100}
+YTDL_OPTIONS = {
+    "format": "bestaudio[ext=opus]/bestaudio[ext=m4a]/bestaudio/best",
+    "outtmpl": "downloaded_musics/%(extractor)s-%(id)s-%(title)s-%(epoch)s.%(ext)s",
+    "restrictfilenames": True,
+    "noplaylist": True,
+    "nocheckcertificate": True,
+    "ignoreerrors": False,
+    "logtostderr": False,
+    "geo-bypass": True,
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "auto",
+    "source_address": "0.0.0.0",
+    "no_color": True,
+    "overwrites": True,
+    "age_limit": 100,
+    "paths": {
+        "temp": "temp_files",
+    },
+}
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 
@@ -75,8 +80,6 @@ class Session:
         self.cancel_disconnect_timer()
         try:
             music_info = await asyncio.to_thread(lambda: ytdl.extract_info(url, download=True))
-            if "entries" in music_info and music_info["entries"]:  # if it's playlist, take first one
-                music_info = music_info["entries"][0]
             if not music_info:
                 await ctx.send("An error occurred getting music info.")
                 return
@@ -129,6 +132,8 @@ def clear_cache():
     """removes all the downloaded files on execute"""
     for file in os.listdir("downloaded_musics"):
         os.remove(os.path.join("downloaded_musics", file))
+    for file in os.listdir("temp_files\\downloaded_musics"):
+        os.remove(os.path.join("temp_files\\downloaded_musics", file))
     print("cleared cache")
 
 
@@ -184,7 +189,7 @@ async def resume(ctx: nextcord.Interaction):
 
 @bot.slash_command()
 async def leave(ctx: nextcord.Interaction):
-    """leave voice channel and delete the server from session list"""
+    """leave voice channel"""
     if ctx.user.voice is None:
         await ctx.send("You are not connected to a voice channel!", ephemeral=True)
         return
@@ -202,11 +207,11 @@ async def skip(ctx: nextcord.Interaction):
     """skip current music"""
     server_id = ctx.guild.id
     if server_id not in session_list:
-        await ctx.send("I'm not playing anything.")
+        await ctx.send("I am not connected to any voice channel.", ephemeral=True)
         return
     session = session_list[server_id]
     if ctx.user.voice is None or ctx.user.voice.channel != session.voice_client.channel:
-        await ctx.send("You must be in the same voice channel!")
+        await ctx.send("You must be in the same voice channel!", ephemeral=True)
         return
     if session.voice_client.is_playing() or session.voice_client.is_paused():
         session.voice_client.stop()
@@ -216,11 +221,29 @@ async def skip(ctx: nextcord.Interaction):
 
 
 @bot.slash_command()
-async def play(ctx: nextcord.Interaction, query: str = SlashOption(
-    name="query",
+async def queue(ctx: nextcord.Interaction):
+    """shows what musics are in queue"""
+    server_id = ctx.guild.id
+    if server_id not in session_list:
+        await ctx.send("I am not connected to any voice channel.", ephemeral=True)
+        return
+    session = session_list[server_id]
+    if ctx.user.voice is None or ctx.user.voice.channel != session.voice_client.channel:
+        await ctx.send("You must be in the same voice channel!", ephemeral=True)
+        return
+    if session.music_queue:
+        music_list = "\n".join(f"{i}: [{music.title}](<{music.video_url}>)" for i, music in enumerate(session.music_queue, start=1))
+        await ctx.send(music_list)
+    else:
+        await ctx.send("The queue is empty")
+
+
+@bot.slash_command()
+async def play(ctx: nextcord.Interaction, url: str = SlashOption(
+    name="url",
     description="Put a link of the song you want to play",
     required=True)):
-    """receive query from a user, and then download the music and play"""
+    """receive url from a user and play"""
 
     await ctx.response.defer()
     server_id = ctx.guild.id
@@ -249,11 +272,13 @@ async def play(ctx: nextcord.Interaction, query: str = SlashOption(
         except Exception as e:
             await ctx.followup.send(f"Could not connect to the voice channel: {e}", ephemeral=True)
             return
-    await session.add_queue(ctx, query)
+    await session.add_queue(ctx, url)
 
 
 if __name__ == "__main__":
     if not os.path.exists("downloaded_musics"):
         os.makedirs("downloaded_musics")
+    if not os.path.exists("temp_files\\downloaded_musics"):
+        os.makedirs("temp_files\\downloaded_musics")
     clear_cache()
     bot.run(TOKEN)
