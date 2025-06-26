@@ -36,81 +36,116 @@ YTDL_OPTIONS = {
     "paths": {
         "temp": "temp_files",
     },
+    "concurrent_fragment_downloads": 8,
 }
 ytdl = yt_dlp.YoutubeDL(YTDL_OPTIONS)
 
 
 class Music:
     """stores music info"""
-    def __init__(self, audio_info, filepath):
+    def __init__(self, audio_info, filepath, requested):
         self.audio_info = audio_info
         self.title = audio_info.get("title", "Error parsing title")
         self.video_url = audio_info.get("webpage_url", "Error parsing url")
         self.duration = audio_info.get("duration", 0)
+        self.thumbnail = audio_info.get("thumbnail", 0)
         self.filepath = filepath
         self.audio_source = None
+        self.requested = requested
 
 
 class Session:
     """stores bot voice client sessions"""
-    def __init__(self, server_id, voice_client: nextcord.VoiceClient):
+    def __init__(self, server_id, voice_client: nextcord.VoiceClient, text_channel):
         self.server_id = server_id
         self.voice_client = voice_client
         self.music_queue = deque()
         self.disconnect_timer = None
+        self.text_channel = text_channel
+        self.now_playing_msg = None
+        self.downloading = False
 
     def cancel_disconnect_timer(self):
         if self.disconnect_timer and not self.disconnect_timer.done():
             self.disconnect_timer.cancel()
 
-    async def _start_disconnect_timer(self, ctx):
+    async def _start_disconnect_timer(self):
         self.cancel_disconnect_timer()
-        self.disconnect_timer = bot.loop.create_task(self._auto_leave(ctx))
+        self.disconnect_timer = bot.loop.create_task(self._auto_leave())
 
-    async def _auto_leave(self, ctx):
+    async def _auto_leave(self):
         """leave after 5 mins of not playing"""
         await asyncio.sleep(300)
         if self.voice_client.is_connected() and not (self.voice_client.is_playing() or self.voice_client.is_paused()):
             await self.voice_client.disconnect()
-            await ctx.followup.send("Left after 5 mins of idling.")
+            await self.text_channel.send("Left after 5 mins of idling.", delete_after=30)
 
 
-    async def add_queue(self, ctx, url):
+    async def add_queue(self, url, user, ctx):
         """adds music to queues"""
-        self.cancel_disconnect_timer()
+        while self.downloading: # to prevent problems when play command is called too fast
+            await asyncio.sleep(0.5)
+
         try:
+            self.downloading = True
+            self.cancel_disconnect_timer()
             music_info = await asyncio.to_thread(lambda: ytdl.extract_info(url, download=True))
             if not music_info:
-                await ctx.send("An error occurred getting music info.")
+                await ctx.followup.send("An error occurred getting music info.", delete_after=10)
                 return
         except Exception as e:
-            await ctx.followup.send(f"Failed to extract audio: {e}")
+            await ctx.followup.send(f"Failed to extract audio: {e}", delete_after=10)
             return
+        finally:
+            self.downloading = False
 
         audio_file = ytdl.prepare_filename(music_info)
-        music = Music(music_info, audio_file)
+        music = Music(music_info, audio_file, user)
         self.music_queue.append(music)
+
         if self.voice_client.is_playing() or self.voice_client.is_paused():
-            await ctx.followup.send(f"{music.title} was added to queue.")
+            await ctx.followup.send(f"{music.title} was added to queue.", delete_after=15)
+
         if not self.voice_client.is_playing() and not self.voice_client.is_paused():
             await self.play_next(ctx)
 
-    async def play_next(self, ctx):
+    async def play_next(self, ctx=None):
         to_play = self.music_queue.popleft()
         try:
             to_play.audio_source = await nextcord.FFmpegOpusAudio.from_probe(to_play.filepath, **FFMPEG_OPTIONS, executable=FFMPEG_PATH)
         except Exception as e:
-            await self.after_playing(ctx, to_play.filepath, e)
+            await self.after_playing(to_play.filepath, e)
             return
         start = datetime.datetime.now()
         end = start + datetime.timedelta(seconds=to_play.duration)
-        await ctx.followup.send(f"Now playing: [{to_play.title}](<{to_play.video_url}>)\n"
-                                f"Duration: {format_dt(start, style="R")} - {format_dt(end, style="R")}")
-        self.voice_client.play(to_play.audio_source, after=lambda e=None: bot.loop.create_task(self.after_playing(ctx, to_play, e)))
+        now_playing_embed = nextcord.Embed(
+            title="Now playing:",
+            description=f"[{to_play.title}](<{to_play.video_url}>)\n"
+                        f"-# Requested by <@{to_play.requested}>",
+            color=nextcord.Color.from_rgb(25, 246, 157))
+        now_playing_embed.add_field(
+            name=f"**{format_dt(start, style="R")} ---------- {format_dt(end, style="R")}**",
+            value=f"**(0:00) ---------- ({str(datetime.timedelta(0, to_play.duration))})**")
+        now_playing_embed.set_image(url=to_play.thumbnail)
 
-    async def after_playing(self, ctx, played, error=None):
+        if ctx:
+            self.now_playing_msg = await ctx.followup.send(embed=now_playing_embed)
+        else:
+            self.now_playing_msg = await self.text_channel.send(embed=now_playing_embed)
+
+        self.voice_client.play(to_play.audio_source, after=lambda e=None: bot.loop.create_task(self.after_playing(to_play, e)))
+
+    async def after_playing(self, played, error=None):
+        if self.now_playing_msg:
+            try:
+                await self.now_playing_msg.delete()
+            except (nextcord.NotFound, nextcord.Forbidden):
+                pass # ignore when can't delete message
+            finally:
+                self.now_playing_msg = None
+
         if error:
-            await ctx.send("An error occurred playing music")
+            await self.text_channel.send("An error occurred playing music", delete_after=10)
 
         await asyncio.sleep(0.5)
 
@@ -122,10 +157,10 @@ class Session:
         if not self.voice_client.is_connected():
             return
         if self.music_queue:  # queue is not empty
-            await self.play_next(ctx)
+            await self.play_next()
         else:
-            await ctx.followup.send("The queue is empty now")
-            await self._start_disconnect_timer(ctx)
+            await self.text_channel.send("The queue is empty now", delete_after=10)
+            await self._start_disconnect_timer()
 
 
 def clear_cache():
@@ -171,7 +206,7 @@ async def pause(ctx: nextcord.Interaction):
     else:
         if session_list[server_id].voice_client.is_playing():
             session_list[server_id].voice_client.pause()
-            await ctx.send(f"<@{ctx.user.id}> Paused a music.")
+            await ctx.send(f"<@{ctx.user.id}> Paused a music.", delete_after=10)
 
 
 @bot.slash_command()
@@ -184,7 +219,7 @@ async def resume(ctx: nextcord.Interaction):
     else:
         if session_list[server_id].voice_client.is_paused():
             session_list[server_id].voice_client.resume()
-            await ctx.send(f"<@{ctx.user.id}> Resumed a music.")
+            await ctx.send(f"<@{ctx.user.id}> Resumed a music.", delete_after=10)
 
 
 @bot.slash_command()
@@ -199,7 +234,7 @@ async def leave(ctx: nextcord.Interaction):
         return
     else:
         await session_list[server_id].voice_client.disconnect()
-        await ctx.send(f"<@{ctx.user.id}> Disconnected from a voice channel.")
+        await ctx.send(f"<@{ctx.user.id}> Disconnected from a voice channel.", delete_after=10)
 
 
 @bot.slash_command()
@@ -215,9 +250,9 @@ async def skip(ctx: nextcord.Interaction):
         return
     if session.voice_client.is_playing() or session.voice_client.is_paused():
         session.voice_client.stop()
-        await ctx.send(f"Skipped by <@{ctx.user.id}>.")
+        await ctx.send(f"Skipped by <@{ctx.user.id}>.", delete_after=10)
     else:
-        await ctx.send("Nothing is playing.")
+        await ctx.send("Nothing is playing.", ephemeral=True)
 
 
 @bot.slash_command()
@@ -235,7 +270,7 @@ async def queue(ctx: nextcord.Interaction):
         music_list = "\n".join(f"{i}: [{music.title}](<{music.video_url}>)" for i, music in enumerate(session.music_queue, start=1))
         await ctx.send(music_list)
     else:
-        await ctx.send("The queue is empty")
+        await ctx.send("The queue is empty", ephemeral=True)
 
 
 @bot.slash_command()
@@ -245,34 +280,34 @@ async def play(ctx: nextcord.Interaction, url: str = SlashOption(
     required=True)):
     """receive url from a user and play"""
 
-    await ctx.response.defer()
-    server_id = ctx.guild.id
     if ctx.user.voice is None:
         await ctx.send("You are not connected to a voice channel!", ephemeral=True)
         return
 
+    await ctx.response.defer()
+    server_id = ctx.guild.id
+
     if server_id not in session_list:
         try:
             session = await ctx.user.voice.channel.connect()
-            session_list[server_id] = Session(ctx.guild.id, session)
+            session_list[server_id] = Session(ctx.guild.id, session, ctx.channel)
             await ctx.followup.send(f"Connected to <#{ctx.user.voice.channel.id}>")
         except Exception as e:
-            await ctx.followup.send(f"Could not connect to the voice channel: {e}", ephemeral=True)
+            await ctx.followup.send(f"Could not connect to the voice channel: {e}", delete_after=10)
             return
 
     session = session_list[server_id]
     if session.voice_client.channel != ctx.user.voice.channel:
         if any(m for m in session.voice_client.channel.members if not m.bot and m.id != bot.user.id):
-            await ctx.followup.send(f"I'm currently in <#{ctx.user.voice.channel.id}> with other users.",
-                                    ephemeral=True)
+            await ctx.followup.send(f"I'm currently in <#{ctx.user.voice.channel.id}> with other users.", delete_after=10)
             return
         try:
             await session.voice_client.move_to(ctx.user.voice.channel)
-            await ctx.followup.send(f"Moved to <#{ctx.user.voice.channel.id}>")
+            await ctx.followup.send(f"Moved to <#{ctx.user.voice.channel.id}>", delete_after=10)
         except Exception as e:
-            await ctx.followup.send(f"Could not connect to the voice channel: {e}", ephemeral=True)
+            await ctx.followup.send(f"Could not connect to the voice channel: {e}", delete_after=10)
             return
-    await session.add_queue(ctx, url)
+    await session.add_queue(url, ctx.user.id, ctx)
 
 
 if __name__ == "__main__":
