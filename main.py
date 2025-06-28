@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from collections import deque
 import yt_dlp
 import asyncio
+from math import ceil
 
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
@@ -53,6 +54,63 @@ class Music:
         self.audio_source = None
         self.requested = requested
 
+
+class QueueView(nextcord.ui.View):
+    def __init__(self, music_queue: deque):
+        super().__init__(timeout=60)
+        self.queue_list = list(music_queue)
+        self.songs_per_page = 10
+        self.current_page = 1
+        self.total_pages = ceil(len(self.queue_list) / self.songs_per_page)
+        self.message = None
+        self.update_button()
+
+    def create_embed(self) -> nextcord.Embed:
+        """Creates an embed for queue command"""
+        start_index = (self.current_page - 1) * self.songs_per_page
+        end_index = start_index + self.songs_per_page
+
+        description = []
+        for i, music in enumerate(self.queue_list[start_index:end_index], start=start_index + 1):
+            description.append(f"{i}: [{music.title}](<{music.video_url}>) - Requested by <@{music.requested}>")
+
+        embed = nextcord.Embed(
+            title="Queue",
+            description="\n".join(description),
+            color = nextcord.Color.from_rgb(25, 246, 157)
+        )
+        footer_page_num = self.current_page
+        footer_total_pages = self.total_pages
+        embed.set_footer(text=f"Page {footer_page_num}/{footer_total_pages}")
+        return embed
+
+    def update_button(self):
+        """Disables buttons based on current page"""
+        self.children[0].disabled = self.current_page == 1
+        self.children[1].disabled = self.current_page == self.total_pages
+
+    @nextcord.ui.button(label="⬅️", style=nextcord.ButtonStyle.blurple)
+    async def previous_button(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        if self.current_page > 1:
+            self.current_page -= 1
+        self.update_button()
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    @nextcord.ui.button(label="➡️", style=nextcord.ButtonStyle.blurple)
+    async def next_button(self, button: nextcord.ui.Button, interaction: nextcord.Interaction):
+        if self.current_page < self.total_pages:
+            self.current_page += 1
+        self.update_button()
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.delete()
+            except (nextcord.NotFound, nextcord.Forbidden):
+                pass
+            finally:
+                self.message = None
 
 class Session:
     """stores bot voice client sessions"""
@@ -262,13 +320,17 @@ async def queue(ctx: nextcord.Interaction):
     if server_id not in session_list:
         await ctx.send("I am not connected to any voice channel.", ephemeral=True)
         return
+
     session = session_list[server_id]
     if ctx.user.voice is None or ctx.user.voice.channel != session.voice_client.channel:
         await ctx.send("You must be in the same voice channel!", ephemeral=True)
         return
+
     if session.music_queue:
-        music_list = "\n".join(f"{i}: [{music.title}](<{music.video_url}>)" for i, music in enumerate(session.music_queue, start=1))
-        await ctx.send(music_list)
+        view = QueueView(session.music_queue)
+        initial_embed = view.create_embed()
+        message = await ctx.send(embed=initial_embed, view=view)
+        view.message = message
     else:
         await ctx.send("The queue is empty", ephemeral=True)
 
